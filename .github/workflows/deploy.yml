@@ -1,0 +1,38 @@
+name: Deploy AvisosJura Bot
+
+on:
+  push:
+    branches: [ "main", "master" ] # Se activa al hacer push a main o master
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      # 1. Descargar el código más reciente
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # 2. Conectarse al servidor y desplegar
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.HOST }}           # IP del servidor (misma que usas)
+          username: ${{ secrets.USERNAME }}   # Usuario 'root'
+          key: ${{ secrets.SSH_PRIVATE_KEY }} # Clave SSH privada (la misma de calvinbot)
+
+          script: |
+            # Entrar a la carpeta del bot
+            cd /opt/bot-citas || exit 1
+
+            # Descargar los cambios de GitHub
+            git fetch origin
+            git reset --hard origin/master
+
+            # (Opcional) Instalar dependencias si tuviéramos un archivo requirements.txt
+            # pip3 install -r requirements.txt --break-system-packages
+
+            # Reiniciar el servicio para aplicar los cambios
+            echo "🔄 Reiniciando el servicio bot-citas..."
+            sudo systemctl restart bot-citas.service
+
+            echo "✅ Despliegue completado para AvisosJura"
