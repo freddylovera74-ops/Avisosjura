@@ -55,16 +55,6 @@ MONITORS: List[Dict[str, Any]] = [
         # Se actualizan automáticamente: mes en curso + mes siguiente
         "filter_months": None,  # Se calcula en runtime
     },
-    {
-        "label": "Registro Civil de Leganés - CITA PREJURAS",
-        "center": "Registro Civil de Leganés",
-        "service_name": "CITA PREJURAS",
-        "id_grupo": 203,
-        "id_servicio": 2274,
-        "tiempo_cita_seconds": 20,
-        "mode": "leganes",
-        "filter_months": None,  # Sin filtro: avisa cuando se abra
-    },
 ]
 
 
