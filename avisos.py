@@ -27,19 +27,18 @@ USER_AGENT = (
 TELEGRAM_API_URL = "https://api.telegram.org"
 
 LOG_FILE_PATH = "avisos.log"
-DEFAULT_POLL_SECONDS = 3600  # 1 hora
+DEFAULT_POLL_SECONDS = 300   # 5 minutos
 
-HEARTBEAT_HOUR = 14       # Reporte diario a las 14:00 hora Madrid
+HEARTBEAT_HOUR = 14          # Reporte diario a las 14:00 Madrid
 HEARTBEAT_ENABLED = True
+
+ACTIVE_HOUR_START = 8        # Empieza a consultar a las 08:00 Madrid
+ACTIVE_HOUR_END = 22         # Deja de consultar a las 22:00 Madrid
+
+MAX_DAYS_AHEAD = 45          # Ventana máxima: hoy + 1 mes y 15 días
 
 # ============================================================
 # MONITORES
-#
-# mode = "madrid"  → avisa SOLO si hay fechas en los meses filtrados
-# mode = "leganes" → avisa cuando el servicio se abre (cualquier fecha)
-#
-# Para Madrid: busca el idGrupo e idServicio en la URL del portal
-# gestiona7.madrid.org al hacer la consulta de citas manualmente.
 # ============================================================
 
 MONITORS: List[Dict[str, Any]] = [
@@ -51,9 +50,6 @@ MONITORS: List[Dict[str, Any]] = [
         "id_servicio": 9891,
         "tiempo_cita_seconds": 30,
         "mode": "madrid",
-        # Meses a vigilar: 4=Abril, 5=Mayo (año actual)
-        # Se actualizan automáticamente: mes en curso + mes siguiente
-        "filter_months": None,  # Se calcula en runtime
     },
 ]
 
@@ -75,12 +71,15 @@ def get_madrid_time() -> datetime:
         return now_utc + timedelta(hours=offset)
 
 
-def get_target_months() -> List[int]:
-    """Devuelve [mes_actual, mes_siguiente] para filtrar citas de Madrid."""
+def seconds_until_active_window() -> float:
+    """Devuelve 0 si estamos en horario activo, o los segundos hasta las 08:00 Madrid."""
     now = get_madrid_time()
-    current = now.month
-    nxt = current % 12 + 1
-    return [current, nxt]
+    if ACTIVE_HOUR_START <= now.hour < ACTIVE_HOUR_END:
+        return 0
+    next_start = now.replace(hour=ACTIVE_HOUR_START, minute=0, second=0, microsecond=0)
+    if now.hour >= ACTIVE_HOUR_END:
+        next_start += timedelta(days=1)
+    return (next_start - now).total_seconds()
 
 
 # ============================================================
@@ -189,7 +188,6 @@ def normalize_date(value: Any) -> str:
 
 
 def parse_date(value: Any) -> Optional[datetime]:
-    """Intenta parsear la fecha a un objeto datetime."""
     raw = normalize_date(value)
     for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y"):
         try:
@@ -199,16 +197,16 @@ def parse_date(value: Any) -> Optional[datetime]:
     return None
 
 
-def filter_by_months(dates: List[Any], months: List[int]) -> List[Any]:
-    """Filtra fechas que correspondan a los meses indicados (año actual o siguiente)."""
+def filter_by_date_window(dates: List[Any]) -> List[Any]:
+    """Filtra fechas dentro de la ventana: hoy → hoy + MAX_DAYS_AHEAD días."""
+    today = get_madrid_time().date()
+    limit = today + timedelta(days=MAX_DAYS_AHEAD)
     result = []
-    now = get_madrid_time()
     for d in dates:
         dt = parse_date(d)
         if dt is None:
             continue
-        # Acepta el año actual o el siguiente (por si el mes siguiente es enero)
-        if dt.month in months and dt.year in (now.year, now.year + 1):
+        if today <= dt.date() <= limit:
             result.append(d)
     return result
 
@@ -222,13 +220,6 @@ def format_dates(dates: List[Any], max_items: int = 15) -> str:
     if extra > 0:
         text += f" (+{extra} más)"
     return text
-
-
-def month_name(month: int) -> str:
-    names = {1: "Enero", 2: "Febrero", 3: "Marzo", 4: "Abril", 5: "Mayo",
-             6: "Junio", 7: "Julio", 8: "Agosto", 9: "Septiembre",
-             10: "Octubre", 11: "Noviembre", 12: "Diciembre"}
-    return names.get(month, str(month))
 
 
 # ============================================================
@@ -255,25 +246,20 @@ class HeartbeatManager:
         self._timer = threading.Timer(seconds, self._send)
         self._timer.daemon = True
         self._timer.start()
-        logging.debug("Próximo heartbeat en %.0f s", seconds)
 
     def _send(self):
         now = get_madrid_time()
-        target_months = get_target_months()
-        month_list = " / ".join(month_name(m) for m in target_months)
-
-        active_monitors = [m for m in MONITORS if m["id_grupo"] != 0]
-        monitor_lines = "\n".join(
-            f"  • {m['center']} ({m['mode'].upper()})" for m in active_monitors
-        )
+        today = now.date()
+        limit = today + timedelta(days=MAX_DAYS_AHEAD)
 
         message = (
             f"✅ <b>AVISO CITAS - REPORTE DIARIO</b>\n"
             f"─────────────────────\n"
             f"🟢 Estado: <b>Funcionando correctamente</b>\n"
             f"📅 Fecha: {now.strftime('%d/%m/%Y')} — {now.strftime('%H:%M')} Madrid\n"
-            f"📋 Monitores activos:\n{monitor_lines}\n"
-            f"🗓️ Meses vigilados (Madrid): {month_list}\n"
+            f"📍 Monitor: Registro Civil de Madrid\n"
+            f"🗓️ Buscando citas: {today.strftime('%d/%m/%Y')} → {limit.strftime('%d/%m/%Y')}\n"
+            f"⏰ Horario activo: {ACTIVE_HOUR_START}:00 – {ACTIVE_HOUR_END}:00\n"
             f"🔄 Intervalo: {DEFAULT_POLL_SECONDS // 60} min\n"
             f"─────────────────────\n"
             f"<i>El bot está activo y monitoreando.</i>"
@@ -325,13 +311,13 @@ class ShutdownHandler:
 
 
 # ============================================================
-# LÓGICA DE CADA MONITOR
+# LÓGICA DEL MONITOR
 # ============================================================
 
 class MonitorState:
     def __init__(self, monitor: Dict[str, Any]):
         self.monitor = monitor
-        self.last_available = False  # True si en el último ciclo había citas
+        self.last_available = False
 
 
 def check_monitor(
@@ -341,60 +327,37 @@ def check_monitor(
     chat_id: str,
 ) -> None:
     m = state.monitor
-    mode = m["mode"]
-
     data = fetch_availability(session, m)
     dias = data["dias_disponibles"]
 
-    if mode == "madrid":
-        dias_validos = dias  # SIN FILTRO DE MESES - MODO PRUEBA
+    # Filtrar: solo citas dentro de la ventana hoy → hoy+45 días
+    dias_validos = filter_by_date_window(dias)
 
-        if dias_validos and not state.last_available:
-            formatted = format_dates(dias_validos)
-            message = (
-                f"🎉 <b>¡CITA DISPONIBLE EN MADRID!</b>\n"
-                f"─────────────────────\n"
-                f"📋 Servicio: {m['service_name']}\n"
-                f"📍 Centro: {m['center']}\n"
-                f"📅 Fechas encontradas: {formatted}\n"
-                f"─────────────────────\n"
-                f"🔗 <a href=\"https://gestiona7.madrid.org/ctac_cita/registro#\">Reservar cita</a>"
-            )
-            send_telegram_message(bot_token, chat_id, message)
-            logging.info("[MADRID] ¡Citas encontradas! → Notificación enviada.")
-            state.last_available = True
-        elif not dias_validos and state.last_available:
-            logging.info("[MADRID] Sin citas disponibles.")
-            state.last_available = False
-        elif dias_validos:
-            logging.info("[MADRID] Siguen habiendo citas disponibles.")
-        else:
-            logging.info("[MADRID] Sin citas disponibles por ahora.")
+    today = get_madrid_time().date()
+    limit = today + timedelta(days=MAX_DAYS_AHEAD)
 
-    elif mode == "leganes":
-        is_open = len(dias) > 0
-
-        if is_open and not state.last_available:
-            # El servicio acaba de abrirse
-            message = (
-                f"🟢 <b>¡LEGANÉS ABIERTO!</b>\n"
-                f"─────────────────────\n"
-                f"📋 Servicio: {m['service_name']}\n"
-                f"📍 Centro: {m['center']}\n"
-                f"📅 Fechas disponibles: {format_dates(dias)}\n"
-                f"─────────────────────\n"
-                f"🔗 <a href=\"https://gestiona7.madrid.org/ctac_cita/registro#\">Reservar cita</a>"
-            )
-            send_telegram_message(bot_token, chat_id, message)
-            logging.info("[LEGANÉS] ¡Servicio abierto! → Notificación enviada.")
-            state.last_available = True
-        elif not is_open and state.last_available:
-            logging.info("[LEGANÉS] El servicio volvió a cerrarse.")
-            state.last_available = False
-        elif is_open:
-            logging.info("[LEGANÉS] Sigue abierto.")
-        else:
-            logging.info("[LEGANÉS] Cerrado, sin fechas disponibles.")
+    if dias_validos and not state.last_available:
+        formatted = format_dates(dias_validos)
+        message = (
+            f"🎉 <b>¡CITA DISPONIBLE EN MADRID!</b>\n"
+            f"─────────────────────\n"
+            f"📋 Servicio: {m['service_name']}\n"
+            f"📍 Centro: {m['center']}\n"
+            f"🗓️ Ventana: hasta {limit.strftime('%d/%m/%Y')}\n"
+            f"📅 Fechas encontradas: {formatted}\n"
+            f"─────────────────────\n"
+            f"🔗 <a href=\"https://gestiona7.madrid.org/ctac_cita/registro#\">Reservar cita</a>"
+        )
+        send_telegram_message(bot_token, chat_id, message)
+        logging.info("[MADRID] ¡Citas dentro de ventana encontradas! → Notificación enviada.")
+        state.last_available = True
+    elif not dias_validos and state.last_available:
+        logging.info("[MADRID] Ya no hay citas en la ventana actual.")
+        state.last_available = False
+    elif dias_validos:
+        logging.info("[MADRID] Siguen habiendo citas en la ventana (hasta %s).", limit.strftime("%d/%m/%Y"))
+    else:
+        logging.info("[MADRID] Sin citas disponibles en la ventana (hasta %s).", limit.strftime("%d/%m/%Y"))
 
 
 # ============================================================
@@ -416,46 +379,31 @@ def main() -> None:
     poll_interval = int(os.getenv("POLL_INTERVAL_SECONDS", str(DEFAULT_POLL_SECONDS)))
     DEFAULT_POLL_SECONDS = poll_interval
 
-    # Filtrar monitores con IDs configurados
-    active_monitors = [m for m in MONITORS if m["id_grupo"] != 0 and m["id_servicio"] != 0]
-    skipped = [m for m in MONITORS if m["id_grupo"] == 0 or m["id_servicio"] == 0]
-
-    if skipped:
-        for m in skipped:
-            logging.warning("Monitor DESACTIVADO (IDs sin configurar): %s", m["label"])
-
-    if not active_monitors:
-        logging.error("No hay ningún monitor activo. Configura los IDs en MONITORS.")
-        sys.exit(1)
-
-    target_months = get_target_months()
-    month_str = " / ".join(month_name(m) for m in target_months)
+    today = get_madrid_time().date()
+    limit = today + timedelta(days=MAX_DAYS_AHEAD)
 
     logging.info("=" * 55)
     logging.info("AVISO CITAS - INICIANDO")
-    logging.info("Monitores activos: %d", len(active_monitors))
-    for m in active_monitors:
-        logging.info("  • [%s] %s", m["mode"].upper(), m["label"])
-    logging.info("Meses vigilados (Madrid): %s", month_str)
-    logging.info("Intervalo de consulta: %d s", poll_interval)
+    logging.info("Monitor: Registro Civil de Madrid - CITA PREJURAS")
+    logging.info("Ventana de búsqueda: %s → %s", today.strftime("%d/%m/%Y"), limit.strftime("%d/%m/%Y"))
+    logging.info("Horario activo: %d:00 – %d:00 Madrid", ACTIVE_HOUR_START, ACTIVE_HOUR_END)
+    logging.info("Intervalo de consulta: %d s (%d min)", poll_interval, poll_interval // 60)
     logging.info("=" * 55)
 
     session = build_session()
-    states = [MonitorState(m) for m in active_monitors]
+    states = [MonitorState(m) for m in MONITORS]
 
     ShutdownHandler(bot_token, chat_id)
     if HEARTBEAT_ENABLED:
         HeartbeatManager(bot_token, chat_id, HEARTBEAT_HOUR)
 
-    # Mensaje de inicio
-    monitor_lines = "\n".join(
-        f"  • {m['center']} ({m['mode'].upper()})" for m in active_monitors
-    )
     startup_msg = (
         f"🚀 <b>AVISO CITAS - INICIADO</b>\n"
         f"─────────────────────\n"
-        f"📋 Monitores:\n{monitor_lines}\n"
-        f"🗓️ Meses objetivo (Madrid): {month_str}\n"
+        f"📍 Monitor: Registro Civil de Madrid\n"
+        f"📋 Servicio: CITA PREJURAS\n"
+        f"🗓️ Buscando citas hasta: {limit.strftime('%d/%m/%Y')}\n"
+        f"⏰ Horario activo: {ACTIVE_HOUR_START}:00 – {ACTIVE_HOUR_END}:00 Madrid\n"
         f"🔄 Intervalo: {poll_interval // 60} min\n"
         f"❤️ Reporte diario: {HEARTBEAT_HOUR}:00 Madrid\n"
         f"─────────────────────\n"
@@ -470,6 +418,16 @@ def main() -> None:
     # Bucle principal
     try:
         while True:
+            wait = seconds_until_active_window()
+            if wait > 0:
+                wake_at = (get_madrid_time() + timedelta(seconds=wait)).strftime("%H:%M")
+                logging.info(
+                    "Fuera de horario activo. Durmiendo hasta las %s Madrid (%.0f min).",
+                    wake_at, wait / 60,
+                )
+                time.sleep(wait)
+                continue
+
             for state in states:
                 try:
                     check_monitor(state, session, bot_token, chat_id)
