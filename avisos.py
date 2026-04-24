@@ -347,33 +347,29 @@ def check_monitor(
     dias = data["dias_disponibles"]
 
     if mode == "madrid":
-        # Solo nos interesan citas en el mes actual y el siguiente
-        target_months = get_target_months()
-        dias_validos = filter_by_months(dias, target_months)
+        dias_validos = dias  # SIN FILTRO DE MESES - MODO PRUEBA
 
         if dias_validos and not state.last_available:
-            month_list = " / ".join(month_name(mo) for mo in target_months)
             formatted = format_dates(dias_validos)
             message = (
                 f"🎉 <b>¡CITA DISPONIBLE EN MADRID!</b>\n"
                 f"─────────────────────\n"
                 f"📋 Servicio: {m['service_name']}\n"
                 f"📍 Centro: {m['center']}\n"
-                f"🗓️ Meses vigilados: {month_list}\n"
                 f"📅 Fechas encontradas: {formatted}\n"
                 f"─────────────────────\n"
                 f"🔗 <a href=\"https://gestiona7.madrid.org/ctac_cita/registro#\">Reservar cita</a>"
             )
             send_telegram_message(bot_token, chat_id, message)
-            logging.info("[MADRID] ¡Citas en %s encontradas! → Notificación enviada.", month_list)
+            logging.info("[MADRID] ¡Citas encontradas! → Notificación enviada.")
             state.last_available = True
         elif not dias_validos and state.last_available:
-            logging.info("[MADRID] Las citas de %s ya no están disponibles.", "/".join(month_name(mo) for mo in target_months))
+            logging.info("[MADRID] Sin citas disponibles.")
             state.last_available = False
         elif dias_validos:
-            logging.info("[MADRID] Siguen habiendo citas en los meses objetivo.")
+            logging.info("[MADRID] Siguen habiendo citas disponibles.")
         else:
-            logging.info("[MADRID] Sin citas en abril/mayo por ahora.")
+            logging.info("[MADRID] Sin citas disponibles por ahora.")
 
     elif mode == "leganes":
         is_open = len(dias) > 0
